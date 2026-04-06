@@ -1,0 +1,1608 @@
+---
+title: "influenza0421"
+author: "Feiyu Wang"
+date: "2023-04-21"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  pdf_document:
+    latex_engine: xelatex
+    toc: yes
+    number_sections: yes
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readr)
+library(dplyr)
+library(survival)
+library(survminer)
+library(survRM2)
+library(ggplot2)
+library(cowplot)
+library(ggfortify)
+library(rms)
+library(lattice)
+library(mice)
+library(MASS)
+library(corrplot)
+library(gridExtra)
+library(VennDiagram)
+library(UpSetR)
+library(lme4)
+library(visreg)
+library(caret)
+library(car)
+influenza <- read.csv2("C:/Users/AtobeSasuke/Desktop/Daten/influenza_rsv_sars.csv")
+colnames(influenza)[15] <- 'Schwäche'
+colnames(influenza)[17] <- 'Durchfälle'
+```
+
+# **1. *Welche Variablen wirken sich wie auf die Liegezeit im Krankenhaus aus?***
+
+POINT: Der Tod kann nicht als Entlassung gewertet werden. Das Status
+wird mit "0 für Event eingetreten, 1 für Event nicht eingetreten"
+gekennzeichnet.
+
+## **1.1 Data Clean**
+
+### 1.1.1 Outlier
+
+```{r outlier}
+#boxplot(influenza$Alter, na.action = na.omit)
+#boxplot(influenza$Fieber, na.action = na.omit)
+#boxplot(influenza$LDH, na.action = na.omit)
+#boxplot(influenza$CRP, na.action = na.omit)
+#boxplot(influenza$Leuko, na.action = na.omit)
+#boxplot(influenza$Glukose, na.action = na.omit)
+
+#influenzana <- influenzana[!is.na(influenzana$Fieber) & influenzana$Fieber <= 45.0, ]
+influenza$Fieber[influenza$Fieber > 45] <- NA
+influenza$Fieber[influenza$Fieber < 34.5] <- NA
+
+influenza[influenza < 0] <- NA
+
+influenza$log_LDH <- log(influenza$LDH)
+boxplot(influenza$log_LDH, na.action = na.omit)
+influenza$log_LDH[!is.finite(influenza$log_LDH)] <- 0
+
+influenza$log_CRP <- log(influenza$CRP)
+boxplot(influenza$log_CRP, na.action = na.omit)
+
+influenza$log_Leuko <- log(influenza$Leuko)
+boxplot(influenza$log_LDH, na.action = na.omit)
+influenza$log_Leuko[!is.finite(influenza$log_Leuko)] <- 0
+
+
+influenza$log_Glukose <- log(influenza$Glukose)
+boxplot(influenza$log_Glukose, na.action = na.omit)
+
+cor_test_age <- cor.test(influenza$Herz, influenza$Alter, method = "pearson")
+cor_test_age #0.32, p<0.001
+
+cor_test_anti <- cor.test(influenza$bakt_Superinfektion, influenza$Antibiotika, method = "pearson")
+cor_test_anti #0.52, p<0.001
+
+cor_test_gl <- cor.test(influenza$Diabetes, influenza$log_Glukose, method = "pearson")
+cor_test_gl #0.41, p<0.001
+#cor tamiflu and Liegezeit =0.5
+
+cor_test_crp <- cor.test(influenza$bakt_Superinfektion, influenza$CRP, method = "pearson")
+cor_test_crp #0.3, p<0.001
+#cor tamiflu and Liegezeit =0.5
+```
+
+Da in der Spalte "Fieber" NA-Wert existiert, kann dieser nicht direkt
+gelöscht werden, stattdessen sollten Ausreißerwerte durch NA-Werte
+ersetzt werden. reference range im menschlichen Körper (zur
+erleichterten Einteilung in mögliche Gruppen später):
+LDH(lactate-dehydrogenase): 124--222 U/L CRP(C-reactive protein): 0--10
+mg/L\
+Leuko(Leukocyte Count):3.5--9.5 ×10\^9/L
+
+### 1.1.2 Reason for NA
+
+```{r tablecheck}
+miss.nu<-mice(influenza, maxit=0)
+miss.nu$nmis
+
+table(influenza$InfluenzaRSV_,influenza$Tamiflu)
+table(influenza$InfluenzaRSV_,influenza$nosokomial)
+table(influenza$InfluenzaRSV_,influenza$Dyspnoe)
+
+table(influenza$bakt_Superinfektion,influenza$Antibiotika)
+
+
+influenza$age_groups<- cut(influenza$Alter, breaks = c(0, 60, Inf), labels = c("age < 60", "age >= 60"))
+#influenza$age_groups<- cut(influenza$Alter, breaks = c(0, 60, Inf), labels = c(0, 1), include.lowest = TRUE)
+#influenza$age_groups <- as.numeric(as.character(influenza$age_groups))
+
+influenza$Liegezeit_group<- cut(influenza$Liegezeit, breaks = c(0, 7, Inf), labels = c("days < 7", "days >= 7"),na.rm = TRUE)
+#table(influenza$age_groups,influenza$Liegezeit_group)
+
+table(influenza$age_groups,influenza$InfluenzaRSV_)
+table(influenza$age_groups,influenza$Herz)
+
+total_count <- sum(!is.na(influenza$Outcome))
+outcome_1_count <- sum(influenza$Outcome == 1, na.rm = TRUE)
+outcome_0_count <- sum(influenza$Outcome == 0, na.rm = TRUE)
+
+outcome_1_proportion <- outcome_1_count / total_count
+outcome_0_proportion <- outcome_0_count / total_count
+
+outcome_1_proportion
+outcome_0_proportion
+
+count1 <- sum(!is.na(influenza$Liegezeit) & influenza$Liegezeit >= 7)
+count1
+
+
+subsets <- split(influenza, influenza$InfluenzaRSV_)
+InfluenzaA <- subsets[[1]]
+RSV <- subsets[[2]]
+InfluenzaB <- subsets[[3]]
+SARSCov2 <- subsets[[4]]
+Omikron <- subsets[[5]]
+
+library(ggplot2)
+
+total_counts <- influenza %>% group_by(Saison) %>% summarise(TotalCount = n())
+total_counts_table <- as.data.frame(total_counts)
+
+prop_table <- prop.table(table(influenza$Saison, influenza$InfluenzaRSV_), margin = 1)
+
+# 将比例数据转换为数据框
+prop_df <- as.data.frame(prop_table)
+
+# 重命名列名
+colnames(prop_df) <- c("Quarter", "respiratory_infection", "Proportion")
+
+# 定义标签
+labels <- c("Influenza A", "RSV", "Influenza B", "SARS-Cov-2", "Omicron")
+
+# 绘制柱状图
+plot2 <- ggplot(prop_df, aes(x = Quarter, y = Proportion, fill = respiratory_infection)) +
+    geom_bar(stat = "identity", position = "dodge", width = 0.6) +
+    labs(title = "",
+         x = "Quarter",
+         y = "Proportion") +
+    theme_minimal() +
+    scale_fill_grey(name = "InfluenzaRSV_", labels = labels) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    geom_text(aes(label = round(Proportion, 2)), position = position_dodge(width = 0.6), vjust = -0.5) +
+    ggtitle("Influenza A (1), RSV (2), Influenza B (3), SARS-Cov-2 (4), Omicron (5)")
+
+
+```
+Influenza A (1), RSV (2), Influenza B (3), SARS-Cov-2 vor Omikron (4),
+Omikron (5).
+
+### 1.1.3 NA
+
+```{r NAcheck}
+#influenzamulti <- influenza[, c("Liegezeit","Outcome","Liegezeit_IVK","Iso_Tage","InfluenzaRSV_", "Alter", "Saison", "Antibiotika", "Beatmung", "bakt_Superinfektion", "Tamiflu", "nosokomial", "Husten", "Dyspnoe", "Kopfschmerzen", "Pneumonie", "Durchfälle", "Diabetes","COPD", "Tumor", "Herz", "Dialyse_Niereninsuff")]
+
+miss.nu1<-mice(InfluenzaA, maxit=0)
+miss.nu1$nmis
+#it can also be:
+#colSums(is.na(influenza2[, c("InfluenzaRSV_","Outcome", "Alter", "Saison", "Antibiotika", "Beatmung", "bakt_Superinfektion", "Tamiflu", "nosokomial", "Husten", "Dyspnoe", "Kopfschmerzen", "Pneumonie", "Durchfälle", "Diabetes","COPD", "Tumor", "Herz", "Dialyse_Niereninsuff")]))
+
+miss.nu2<-mice(RSV, maxit=0)
+miss.nu2$nmis
+
+miss.nu3<-mice(InfluenzaB, maxit=0)
+miss.nu3$nmis
+
+miss.nu4<-mice(SARSCov2, maxit=0)
+miss.nu4$nmis
+
+miss.nu5<-mice(Omikron, maxit=0)
+miss.nu5$nmis
+
+```
+
+NA von weniger als 5% der Daten sind akzeptabel.
+
+```{r NAdrop1}
+InfluenzaA <- InfluenzaA[!is.na(InfluenzaA$Husten)&!is.na(InfluenzaA$Kopfschmerzen)
+                  &!is.na(InfluenzaA$Schwäche)&!is.na(InfluenzaA$Pneumonie)
+                  &!is.na(InfluenzaA$Durchfälle)&!is.na(InfluenzaA$CRP)
+                  &!is.na(InfluenzaA$Leuko)&!is.na(InfluenzaA$Beatmung)
+                  &!is.na(InfluenzaA$Antibiotika)& !is.na(InfluenzaA$Tamiflu) & !is.na(InfluenzaA$COPD), ]
+
+miss.nu12<-mice(InfluenzaA, maxit=0)
+miss.nu12$nmis
+```
+
+682 InfluenzaA.
+
+```{r NAdrop2}
+RSV <- RSV[!is.na(RSV$Sex)&!is.na(RSV$Outcome)
+                  &!is.na(RSV$Husten)&!is.na(RSV$Kopfschmerzen)
+                  &!is.na(RSV$Schwäche)&!is.na(RSV$Pneumonie)
+                  &!is.na(RSV$Durchfälle)&!is.na(RSV$CRP)
+                  &!is.na(RSV$Leuko)&!is.na(RSV$Beatmung)
+                  &!is.na(RSV$Antibiotika)& !is.na(RSV$COPD) 
+                  & !is.na(RSV$Diabetes) & !is.na(RSV$Tumor) 
+                  &!is.na(RSV$Herz)&!is.na(RSV$Dialyse_Niereninsuff) , ]
+
+miss.nu21<-mice(RSV, maxit=0)
+miss.nu21$nmis
+```
+
+336 RSV.
+
+```{r NAdrop3}
+InfluenzaB <- InfluenzaB[!is.na(InfluenzaB$Sex)&!is.na(InfluenzaB$Outcome)
+                  &!is.na(InfluenzaB$Husten)&!is.na(InfluenzaB$Kopfschmerzen)
+                  &!is.na(InfluenzaB$Schwäche)&!is.na(InfluenzaB$Pneumonie)
+                  &!is.na(InfluenzaB$Durchfälle)&!is.na(InfluenzaB$CRP)
+                  &!is.na(InfluenzaB$Leuko)&!is.na(InfluenzaB$Beatmung)
+                  &!is.na(InfluenzaB$Antibiotika)& !is.na(InfluenzaB$COPD) 
+                  & !is.na(InfluenzaB$Diabetes) & !is.na(InfluenzaB$Tumor) 
+                  &!is.na(InfluenzaB$Herz)&!is.na(InfluenzaB$Dialyse_Niereninsuff) , ]
+miss.nu31<-mice(InfluenzaB, maxit=0)
+miss.nu31$nmis
+```
+
+306 InfluenzaB.
+
+```{r NAdrop4}
+SARSCov2 <- SARSCov2[!is.na(SARSCov2$Sex)&!is.na(SARSCov2$Outcome)
+                  &!is.na(SARSCov2$Husten)&!is.na(SARSCov2$Kopfschmerzen)
+                  &!is.na(SARSCov2$Schwäche)&!is.na(SARSCov2$Pneumonie)
+                  &!is.na(SARSCov2$Durchfälle)&!is.na(SARSCov2$CRP)
+                  &!is.na(SARSCov2$Leuko)&!is.na(SARSCov2$Beatmung)
+                  &!is.na(SARSCov2$Antibiotika)& !is.na(SARSCov2$COPD) 
+                  & !is.na(SARSCov2$Diabetes) & !is.na(SARSCov2$Tumor) 
+                  &!is.na(SARSCov2$Herz)&!is.na(SARSCov2$Dialyse_Niereninsuff)&!is.na(SARSCov2$bakt_Superinfektion)&!is.na(SARSCov2$Iso_Tage) , ]
+miss.nu41<-mice(SARSCov2, maxit=0)
+miss.nu41$nmis
+```
+
+318 SARS-COV-2 vor Omicron.
+
+```{r NAdrop5}
+Omikron <- Omikron[!is.na(Omikron$Sex)&!is.na(Omikron$Outcome)
+                  &!is.na(Omikron$Husten)&!is.na(Omikron$Kopfschmerzen)
+                  &!is.na(Omikron$Schwäche)&!is.na(Omikron$Pneumonie)
+                  &!is.na(Omikron$Durchfälle)&!is.na(Omikron$CRP)
+                  &!is.na(Omikron$Leuko)&!is.na(Omikron$Beatmung)
+                  &!is.na(Omikron$Antibiotika)& !is.na(Omikron$COPD) 
+                  & !is.na(Omikron$Diabetes) & !is.na(Omikron$Tumor) 
+                  &!is.na(Omikron$Herz)&!is.na(Omikron$Dialyse_Niereninsuff)&!is.na(Omikron$bakt_Superinfektion) , ]
+
+miss.nu51<-mice(Omikron, maxit=0)
+miss.nu51$nmis
+```
+
+472 Omikron.
+#Tamiflu主要用于治疗流感病毒感染，而不是新冠病毒感染.
+
+```{r mdpattern}
+#missing data pattern
+checkk <- influenza[c("Liegezeit_IVK", "Iso_Tage","Tamiflu", "nosokomial", "Fieber", "Dyspnoe","LDH","Glukose","bakt_Superinfektion")]
+md.pattern(checkk)
+
+#某两种数据的缺失之间是否有关系,如果Liegezeit_IVK是完全随机缺失，则不论bakt_Superinfektion缺失与否，其分布是相同的，本例Liegezeit_IVK缺失取决于bakt_Superinfektion，因此Liegezeit_IVK缺失不可能是完全随机缺失(MCAR)。
+#summary(influenzana)
+#library(lattice)
+#histogram(influenzana$Liegezeit_IVK)
+
+
+```
+
+md.pattern(checkk) zeigt, keine Daten sind komplett.
+
+histogram(\~Liegezeit_IVK\|is.na(nosokomial), data=influenzana):
+Liegezeit_IVK ist MNAR(missing not at random)(?)
+
+
+POINT: Der Tod kann nicht als Entlassung gewertet werden. 
+Das Status wird mit "0 für Event eingetreten,"1 für Event nicht eingetreten
+gekennzeichnet.
+influenza : Outcome: überlebt/verstorben (0/1)
+通常使用0表示事件未发生，使用1表示事件发生(出院)。
+
+## **1.2 Univariate Analyse**
+
+#分别讨论五种不同病毒感染对应的影响元素。 \### 1.2.1 Influenza A
+#对于influenza A来说：
+#gender无关(p=0.6),saison无关(p=0.8),fieber无关,durchfalle无关 42/682 =1
+#640= NA fuer nosokomial,无法分析 dyspnoe，51/682=1 540NA，无法分析
+
+### 1.2.1 Influenza A
+
+```{r InfluenzaAVorbereitung}
+InfluenzaA$Outcome <- ifelse(InfluenzaA$Outcome == 0,1,0)
+surv_a <- Surv(time = InfluenzaA$Liegezeit, event = InfluenzaA$Outcome)
+kmliegezeit_a <- with(InfluenzaA, Surv(Liegezeit, Outcome))
+
+#age_groups_a <- cut(InfluenzaA$Alter, breaks = c(0, 40, 90 , Inf), labels = c("age < 40", "40 <= age < 90", "age >= 90"))
+InfluenzaA$age_groups_a <- cut(InfluenzaA$Alter, breaks = c(0, 76, Inf), labels = c("age < 76", "age >= 76"))
+
+#fieber_groups <- cut(influenzana2$Fieber, breaks = c(0, 37.2 , 38.5, Inf), labels = c("Temperatur < 37,2", "37,2 <= Temperatur < 38,5", "Temperatur >= 38,5"))
+fieber_groups_a <- cut(InfluenzaA$Fieber, breaks = c(0, 37.2, Inf),labels = c("Temperatur < 37,2", "Temperatur >= 37,2"))
+
+```
+
+```{r influenzaAage}
+table(InfluenzaA$age_groups_a)
+
+km_fitalter_a <- survfit(Surv(Liegezeit) ~ age_groups_a, data = InfluenzaA)
+modelage_a <- coxph(surv_a ~ age_groups_a, data = InfluenzaA)
+summary(modelage_a)
+
+ggsurvplot(km_fitalter_a,data=InfluenzaA,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "Alter", ylab="Prozentsatz der noch im Liegezeit",legend.labs = c("age < 76","age >= 76"), break.x.by = 20, censor.shape = 124,censor.size = 3)
+```
+
+```{r influenzaATamiflu}
+#167/682 tamiflu=1
+modeltami_a <- coxph(surv_a ~ Tamiflu, data = InfluenzaA)
+summary(modeltami_a)
+```
+
+```{r influenzaAbakt}
+modelbakt_a <- coxph(surv_a ~ bakt_Superinfektion, data = InfluenzaA)
+summary(modelbakt_a)
+```
+
+```{r influenzaASymptome}
+modelhusten_a <- coxph(surv_a ~ Husten, data = InfluenzaA)
+summary(modelhusten_a)
+
+#596/682=0,86/682=1 no_filtered <- InfluenzaA %>% filter((Kopfschmerzen == 0)) 
+modelkopf_a <- coxph(surv_a ~ Kopfschmerzen, data = InfluenzaA)
+summary(modelkopf_a)
+
+modelpneumonie_a <- coxph(surv_a ~ Pneumonie, data = InfluenzaA)
+summary(modelpneumonie_a)
+```
+
+```{r influenzaAVorerkrankungen}
+modelcopd_a <- coxph(surv_a ~ COPD, data = InfluenzaA)
+summary(modelcopd_a)
+
+modeltumor_a <- coxph(surv_a ~ Tumor, data = InfluenzaA)
+summary(modeltumor_a)
+
+modelniere_a <- coxph(surv_a ~ Dialyse_Niereninsuff, data = InfluenzaA)
+summary(modelniere_a)
+```
+
+```{r influenzaAlabor}
+modellabor_a2 <- coxph(surv_a ~ log_CRP, data = InfluenzaA)
+summary(modellabor_a2)
+
+modellabor_a3 <- coxph(surv_a ~ log_Leuko, data = InfluenzaA)
+summary(modellabor_a3)
+
+modellabor_a4 <- coxph(surv_a ~ log_Glukose, data = InfluenzaA)
+summary(modellabor_a4)
+```
+```{r influenzaAzusammen}
+#分别回归
+covariates_a <- c( "Tamiflu", "bakt_Superinfektion","nosokomial", "Husten", "Kopfschmerzen", "Pneumonie","COPD","Tumor","Dialyse_Niereninsuff","log_CRP","log_Leuko","log_Glukose")
+
+univ_form_a <- sapply(covariates_a,function(x) as.formula(paste('Surv(time = InfluenzaA$Liegezeit, event = InfluenzaA$Outcome)~', x)))
+univ_model_a <- lapply( univ_form_a, function(x){coxph(x, data = InfluenzaA)})
+
+
+univ_result_a <- lapply(univ_model_a,
+                       function(x){
+                         x <- summary(x)
+                         p.value<-signif(x$wald["pvalue"], digits=2)
+                         wald.test<-signif(x$wald["test"], digits=2)
+                         beta<-signif(x$coef[1], digits=2);#coeficient beta
+                         HR <-signif(x$coef[2], digits=2);#exp(beta)
+                         HR.confint.lower <- signif(x$conf.int[,"lower .95"], 2)
+                         HR.confint.upper <- signif(x$conf.int[,"upper .95"],2)
+                         HR <- paste0(HR, " (",
+                                      HR.confint.lower, "-", HR.confint.upper, ")")
+                         res_a<-c(beta, HR, wald.test, p.value)
+                         names(res_a)<-c("beta", "HR (95% CI for HR)", "wald.test",
+                                       "p.value")
+                         return(res_a)
+                         #return(exp(cbind(coef(x),confint(x))))
+                       })
+res_a <- t(as.data.frame(univ_result_a, check.names = FALSE))
+as.data.frame(res_a)
+
+```
+
+### 1.2.2 RSV
+
+```{r RSVVorbereitung}
+RSV$Outcome <- ifelse(RSV$Outcome == 0,1,0)
+surv_rsv <- Surv(time = RSV$Liegezeit, event = RSV$Outcome)
+kmliegezeit_rsv <- with(RSV, Surv(Liegezeit, Outcome))
+
+#age_groups_rsv <- cut(RSV$Alter, breaks = c(0, 40,90 , Inf), labels = c("age < 40", "40 <= age < 90", "age >= 90"))
+RSV$age_groups_rsv <- cut(RSV$Alter, breaks = c(0, 78, Inf), labels = c("age < 78", "age >= 78"))
+
+#fieber_groups <- cut(influenzana2$Fieber, breaks = c(0, 37.2 , 38.5, Inf), labels = c("Temperatur < 37,2", "37,2 <= Temperatur < 38,5", "Temperatur >= 38,5"))
+fieber_groups_rsv <- cut(RSV$Fieber, breaks = c(0, 37.2, Inf),labels = c("Temperatur < 37,2", "Temperatur >= 37,2"))
+```
+
+```{r RSVsaison}
+#saison 5 gibt es keine Patient mit RSV.
+modelsaison_rsv <- coxph(surv_rsv ~ Saison, data = RSV)
+summary(modelsaison_rsv)
+km_fitsaison_rsv <- survfit(Surv(Liegezeit, Outcome) ~ Saison, data=RSV)
+
+ggsurvplot(km_fitsaison_rsv,data=RSV,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "Saison", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("1","2","3","4","6"), palette = "rickandmorty", break.x.by = 20, censor.shape = 124,censor.size = 3)
+```
+
+```{r RSVage}
+table(RSV$age_groups_rsv)
+
+km_fitalter_rsv <- survfit(Surv(Liegezeit) ~ age_groups_rsv, data = RSV)
+
+modelage_rsv <- coxph(surv_rsv ~ age_groups_rsv, data = RSV)
+summary(modelage_rsv)
+
+ggsurvplot(km_fitalter_rsv,data=RSV,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "Alter", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("age < 78","age >= 78"), break.x.by = 20, censor.shape = 124,censor.size = 3)
+```
+
+```{r RSVnosokomial}
+modelnoso_rsv <- coxph(surv_rsv ~ nosokomial, data = RSV)
+summary(modelnoso_rsv)
+```
+
+```{r RSVfieber}
+modelfieber_rsv <- coxph(surv_rsv ~ fieber_groups_rsv, data = RSV)
+summary(modelfieber_rsv)
+```
+
+```{r RSVbakt}
+modelbakt_rsv <- coxph(surv_rsv ~ bakt_Superinfektion, data = RSV)
+summary(modelbakt_rsv)
+```
+
+```{r RSVSymptome}
+modelhusten_rsv <- coxph(surv_rsv ~ Husten, data = RSV)
+summary(modelhusten_rsv)
+
+modelpneumonie_rsv <- coxph(surv_rsv ~Pneumonie, data = RSV)
+summary(modelpneumonie_rsv)
+```
+
+```{r RSVVorerkrankungen}
+modeldiabetes_rsv <- coxph(surv_rsv ~Diabetes, data = RSV)
+summary(modeldiabetes_rsv)
+```
+
+```{r RSVlabor}
+modellabor_rsv1 <- coxph(surv_rsv ~ log_LDH, data = RSV)
+summary(modellabor_rsv1) 
+
+modellabor_rsv2 <- coxph(surv_rsv ~ log_CRP, data = RSV)
+summary(modellabor_rsv2)
+
+modellabor_rsv4 <- coxph(surv_rsv ~ log_Glukose, data = RSV)
+summary(modellabor_rsv4)
+```
+
+### 1.2.3 Influenza B
+
+Dypnoe全部缺失。nosokomial缺失了291/306个。
+
+```{r InfluenzaBVorbereitung}
+InfluenzaB$Outcome <- ifelse(InfluenzaB$Outcome == 0,1,0)
+surv_b <- Surv(time = InfluenzaB$Liegezeit, event = InfluenzaB$Outcome)
+kmliegezeit_b <- with(InfluenzaB, Surv(Liegezeit, Outcome))
+
+age_groups_b <- cut(InfluenzaB$Alter, breaks = c(0, 78 , Inf), labels = c("age < 78", "age >= 78"))
+
+#fieber_groups <- cut(influenzana2$Fieber, breaks = c(0, 37.2 , 38.5, Inf), labels = c("Temperatur < 37,2", "37,2 <= Temperatur < 38,5", "Temperatur >= 38,5"))
+fieber_groups_b <- cut(InfluenzaB$Fieber, breaks = c(0, 37.2, Inf),labels = c("Temperatur < 37,2", "Temperatur >= 37,2"))
+```
+
+```{r InfluenzaBsaison}
+#nur 1,2,4有记录
+modelsaison_b <- coxph(surv_b ~ Saison, data = InfluenzaB)
+summary(modelsaison_b)
+km_fitsaison_b <- survfit(Surv(Liegezeit, Outcome) ~ Saison, data=InfluenzaB)
+
+ggsurvplot(km_fitsaison_b,data=InfluenzaB,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "Saison", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("1","2","4"), palette = "rickandmorty", break.x.by = 20, censor.shape = 124,censor.size = 3)
+```
+
+```{r InfluenzaBTamiflu}
+#55/306 = 1 
+modeltami_b <- coxph(surv_b ~ Tamiflu, data = InfluenzaB)
+summary(modeltami_b)
+```
+
+```{r influenzaBbakt}
+modelbakt_b <- coxph(surv_b ~ bakt_Superinfektion, data = InfluenzaB)
+summary(modelbakt_b)
+```
+
+```{r InfluenzaBSymptome}
+modelkopf_b <- coxph(surv_b ~Kopfschmerzen, data = InfluenzaB)
+summary(modelkopf_b)
+
+modelpneumonie_b <- coxph(surv_b ~Pneumonie, data = InfluenzaB)
+summary(modelpneumonie_b)
+```
+
+```{r InfluenzaBVorerkrankungen}
+modelniere_b <- coxph(surv_b ~Dialyse_Niereninsuff, data = InfluenzaB)
+summary(modelniere_b)
+```
+
+```{r InfluenzaBlabor}
+modellabor_b2 <- coxph(surv_b ~ log_CRP, data = InfluenzaB)
+summary(modellabor_b2)
+
+modellabor_b3 <- coxph(surv_b ~ log_Leuko, data = InfluenzaB)
+summary(modellabor_b3)
+```
+### 1.2.4 SARS-Cov-2 vor Omikron
+
+#全是saison 5的记录。 Tamiflu全部缺失。
+
+```{r SARSVorbereitung}
+SARSCov2$Outcome <- ifelse(SARSCov2$Outcome == 0,1,0)
+surv_sars <- Surv(time = SARSCov2$Liegezeit, event = SARSCov2$Outcome)
+kmliegezeit_sars <- with(SARSCov2, Surv(Liegezeit, Outcome))
+
+age_groups_sars <- cut(SARSCov2$Alter, breaks = c(0,75, Inf), labels = c("age < 75",  "age >= 75"))
+
+#fieber_groups <- cut(influenzana2$Fieber, breaks = c(0, 37.2 , 38.5, Inf), labels = c("Temperatur < 37,2", "37,2 <= Temperatur < 38,5", "Temperatur >= 38,5"))
+fieber_groups_sars <- cut(SARSCov2$Fieber, breaks = c(0, 37.2, Inf),labels = c("Temperatur < 37,2", "Temperatur >= 37,2"))
+```
+
+```{r SARSnosokomial}
+table(SARSCov2$nosokomial)
+
+modelnoso_sars <- coxph(surv_sars ~ nosokomial, data = SARSCov2)
+summary(modelnoso_sars)
+```
+
+```{r SARSbakt}
+modelbakt_sars <- coxph(surv_sars ~ bakt_Superinfektion, data = SARSCov2)
+summary(modelbakt_sars)
+```
+
+```{r SARSCov2Symptome}
+modelkopf_sars <- coxph(surv_sars ~Kopfschmerzen, data = SARSCov2)
+summary(modelkopf_sars)
+```
+
+```{r SARSCov2Vorerkrankungen}
+modeldiabetes_sars <- coxph(surv_sars ~Diabetes, data = SARSCov2)
+summary(modeldiabetes_sars)
+
+modelherz_sars <- coxph(surv_sars ~Herz, data = SARSCov2)
+summary(modelherz_sars)
+
+modelniere_sars <- coxph(surv_sars ~Dialyse_Niereninsuff, data = SARSCov2)
+summary(modelniere_sars)
+```
+
+```{r SARSCov2labor}
+modellabor_sars2 <- coxph(surv_sars ~ log_CRP, data = SARSCov2)
+summary(modellabor_sars2)
+
+modellabor_sars4 <- coxph(surv_sars ~ log_Glukose, data = SARSCov2)
+summary(modellabor_sars4)
+```
+
+### 1.2.5 Omikron
+
+#只在saison 6有记录。 Tamiflu完全缺失 nosokomial缺失402。
+
+```{r OmikronVorbereitung}
+Omikron$Outcome <- ifelse(Omikron$Outcome == 0,1,0)
+surv_o <- Surv(time = Omikron$Liegezeit, event = Omikron$Outcome)
+kmliegezeit_o <- with(Omikron, Surv(Liegezeit, Outcome))
+
+Omikron$age_groups_o <- cut(Omikron$Alter, breaks = c(0, 77, Inf), labels = c("age < 77", "age >= 77"))
+
+#fieber_groups <- cut(influenzana2$Fieber, breaks = c(0, 37.2 , 38.5, Inf), labels = c("Temperatur < 37,2", "37,2 <= Temperatur < 38,5", "Temperatur >= 38,5"))
+fieber_groups_o <- cut(Omikron$Fieber, breaks = c(0, 37.2, Inf),labels = c("Temperatur < 37,2", "Temperatur >= 37,2"))
+```
+
+```{r Omikronage}
+table(Omikron$age_groups_o)
+modelage_o <- coxph(surv_o ~ age_groups_o, data = Omikron)
+summary(modelage_o)
+km_fitalter_o <- survfit(Surv(Liegezeit) ~ age_groups_o, data = Omikron)
+
+ggsurvplot(km_fitalter_o,data=Omikron,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "Alter", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("age < 77","age >= 77"), break.x.by = 20, censor.shape = 124,censor.size = 3)
+```
+
+```{r Omikronbakt}
+modelbakt_o <- coxph(surv_o ~ bakt_Superinfektion, data = Omikron)
+summary(modelbakt_o)
+```
+
+```{r OmikronSymptome}
+modelkopf_o <- coxph(surv_o ~Kopfschmerzen, data = Omikron)
+summary(modelkopf_o)
+
+modeldurchfalle_o <- coxph(surv_o ~Durchfälle, data = Omikron)
+summary(modeldurchfalle_o)
+
+modelpneumonie_o <- coxph(surv_o ~Pneumonie, data = Omikron)
+summary(modelpneumonie_o)
+```
+
+```{r OmikronVorerkrankungen}
+modeldiabetes_o <- coxph(surv_o ~Diabetes, data = Omikron)
+summary(modeldiabetes_o)
+
+modelherz_o <- coxph(surv_o ~Herz, data = Omikron)
+summary(modelherz_o)
+
+modelniere_o <- coxph(surv_o ~Dialyse_Niereninsuff, data = Omikron)
+summary(modelniere_o)
+```
+
+```{r Omikronlabor}
+modellabor_o1 <- coxph(surv_o ~ log_LDH, data = Omikron)
+summary(modellabor_o1)
+
+modellabor_o2 <- coxph(surv_o ~ log_CRP, data = Omikron)
+summary(modellabor_o2)
+```
+### 1.2.6 Zusammenfassung
+
+#数据情况：
+
+**Influenza A (1) 682**
+
+Saison: 1, 2, 3, 4, 6
+
+age_group: "age \< 40", "40 \<= age \< 90", "age \>= 90"
+
+31 596 55
+
+Tamiflu: komplett
+
+nosokomial: 640/682 NA(rest == 1)
+
+Dyspnoe: 542/682 NA
+
+**RSV (2) 336**
+
+Saison: 1, 2, 3, 4, 6
+
+age_group: "age \< 40", "40 \<= age \< 90", "age \>= 90"
+
+7 293 36
+
+Tamiflu: alle Werte sind NA.
+
+nosokomial: normal
+
+**Influenza B (3) 306**
+
+Saison: 1, 2, 4
+
+age_group: "age \< 40", "40 \<= age \< 90", "age \>= 90"
+
+7 273 26
+
+Tamiflu: komplett
+
+nosokomial: 291/306 NA(rest == 1)
+
+Dyspnoe: alle Werte sind NA.
+
+**SARS-Cov-2 vor Omikron (4) 318**
+
+Saison: 5
+
+age_group: "age \< 40", "40 \<= age \< 90", "age \>= 90"
+
+19 271 28
+
+Tamiflu: alle Werte sind NA.
+
+nosokomial: 173/318 NA
+
+**Omikron (5) 472**
+
+Saison: 6
+
+age_group: "age \< 40", "40 \<= age \< 90", "age \>= 90"
+
+19 424 29
+
+Tamiflu: alle Werte sind NA.
+
+nosokomial: 402/472 NA(rest == 1)
+
+### 1.2.7 about Nosomial
+```{r vermutungnosomial}
+InfluenzaA$nosokomial[is.na(InfluenzaA$nosokomial)] <- 0
+modelnoso_a <- coxph(surv_a ~ nosokomial, data = InfluenzaA)
+summary(modelnoso_a)
+
+InfluenzaB$nosokomial[is.na(InfluenzaB$nosokomial)] <- 0
+modelnoso_b <- coxph(surv_b ~ nosokomial, data = InfluenzaB)
+summary(modelnoso_b)
+
+Omikron$nosokomial[is.na(Omikron$nosokomial)] <- 0
+modelnoso_o <- coxph(surv_o ~ nosokomial, data = Omikron)
+summary(modelnoso_o)
+```
+### 1.2.8 Vergleichplot
+
+```{r Compareplot_age}
+hr_age_a <- exp(coef(modelage_a))
+ci_age_a <- exp(confint(modelage_a))
+
+hr_age_o <- exp(coef(modelage_o))
+ci_age_o <- exp(confint(modelage_o))
+
+result_age <- data.frame(
+  HR = c(hr_age_a,  hr_age_o),
+  upper = c(ci_age_a[1],  ci_age_o[1]),
+  lower = c(ci_age_a[2],  ci_age_o[2]),
+  row.names = c("InfluenzaA","Omikron"),
+  check.names = FALSE
+)
+
+ggplot(result_age, aes(x = HR, y = rownames(result_age), color = rownames(result_age))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Age on Influenza A and Omicron") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_age)), hjust = 1.4, size = 4)+
+  theme(axis.text.y = element_text(size = 16))
+
+
+```
+
+```{r Compareplot_Tamiflu}
+hr_tami_a <- exp(coef(modeltami_a))
+ci_tami_a <- exp(confint(modeltami_a))
+
+hr_tami_b <- exp(coef(modeltami_b))
+ci_tami_b <- exp(confint(modeltami_b))
+
+result_tami <- data.frame(
+  HR = c(hr_tami_a, hr_tami_b),
+  upper = c(ci_tami_a[1], ci_tami_b[1]),
+  lower = c(ci_tami_a[2], ci_tami_b[2]),
+  row.names = c("Influenza A", "Influenza B"),
+  check.names = FALSE
+)
+
+ggplot(result_tami, aes(x = HR, y = rownames(result_tami), color = rownames(result_tami))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Tamiflu on Two Viruses") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_tami)), hjust = 1.4, size = 4)
+
+
+```
+
+```{r Compareplot_bakt}
+hr_bakt_a <- exp(coef(modelbakt_a))
+ci_bakt_a <- exp(confint(modelbakt_a))
+
+hr_bakt_rsv <- exp(coef(modelbakt_rsv))
+ci_bakt_rsv <- exp(confint(modelbakt_rsv))
+
+hr_bakt_b <- exp(coef(modelbakt_b))
+ci_bakt_b <- exp(confint(modelbakt_b))
+
+hr_bakt_sars <- exp(coef(modelbakt_sars))
+ci_bakt_sars <- exp(confint(modelbakt_sars))
+
+
+result_bakt <- data.frame(
+  HR = c(hr_bakt_a, hr_bakt_rsv, hr_bakt_b,hr_bakt_sars),
+  upper = c(ci_bakt_a[1], ci_bakt_rsv[1], ci_bakt_b[1],ci_bakt_sars[1]),
+  lower = c(ci_bakt_a[2], ci_bakt_rsv[2], ci_bakt_b[2],ci_bakt_sars[2]),
+  row.names = c("InfluenzaA", "RSV","Influenza B","SARS"),
+  check.names = FALSE
+)
+
+# 绘制图形
+ggplot(result_bakt, aes(x = HR, y = rownames(result_bakt), color = rownames(result_bakt))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Bacterial infection on Four Viruses") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_bakt)), hjust = 1.4, size = 4)
+
+
+```
+
+```{r Compareplot_nosokomial}
+hr_noso_a <- exp(coef(modelnoso_a))
+ci_noso_a <- exp(confint(modelnoso_a))
+
+hr_noso_rsv <- exp(coef(modelnoso_rsv))
+ci_noso_rsv <- exp(confint(modelnoso_rsv))
+
+hr_noso_b <- exp(coef(modelnoso_b))
+ci_noso_b <- exp(confint(modelnoso_b))
+
+hr_noso_sars <- exp(coef(modelnoso_sars))
+ci_noso_sars <- exp(confint(modelnoso_sars))
+
+hr_noso_o <- exp(coef(modelnoso_o))
+ci_noso_o <- exp(confint(modelnoso_o))
+
+result_noso <- data.frame(
+  HR = c(hr_noso_a, hr_noso_rsv, hr_noso_b,hr_noso_sars,hr_noso_o),
+  upper = c(ci_noso_a[1], ci_noso_rsv[1], ci_noso_b[1],ci_noso_sars[1],ci_noso_o[1]),
+  lower = c(ci_noso_a[2], ci_noso_rsv[2], ci_noso_b[2],ci_noso_sars[2],ci_noso_o[2]),
+  row.names = c("InfluenzaA", "RSV","Influenza B","SARS", "Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+ggplot(result_noso, aes(x = HR, y = rownames(result_noso), color = rownames(result_noso))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Nosocomial Infection on Five Viruses") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_noso)), hjust = 1.4, size = 4)
+
+
+```
+
+```{r Compareplot_Vorerkrankungen}
+hr_diabetes_rsv <- exp(coef(modeldiabetes_rsv))
+ci_diabetes_rsv <- exp(confint(modeldiabetes_rsv))
+
+hr_diabetes_sars <- exp(coef(modeldiabetes_sars))
+ci_diabetes_sars <- exp(confint(modeldiabetes_sars))
+
+hr_diabetes_o <- exp(coef(modeldiabetes_o))
+ci_diabetes_o <- exp(confint(modeldiabetes_o))
+
+result_diabetes <- data.frame(
+  HR = c(hr_diabetes_rsv,hr_diabetes_sars,hr_diabetes_o),
+  upper = c(ci_diabetes_rsv[1],ci_diabetes_sars[1],ci_diabetes_o[1]),
+  lower = c(ci_diabetes_rsv[2],ci_diabetes_sars[2],ci_diabetes_o[2]),
+  row.names = c("RSV", "SARS", "Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+plot1 <- ggplot(result_diabetes, aes(x = HR, y = rownames(result_diabetes), color = rownames(result_diabetes))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Diabetes on SARS-CoV-2, RSV and Omicron") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_diabetes)), hjust = 1.4, size = 4)+     theme(axis.text.y = element_text(size = 16))
+
+
+hr_herz_sars <- exp(coef(modelherz_sars))
+ci_herz_sars <- exp(confint(modelherz_sars))
+
+hr_herz_o <- exp(coef(modelherz_o))
+ci_herz_o <- exp(confint(modelherz_o))
+
+result_herz <- data.frame(
+  HR = c(hr_herz_sars,hr_herz_o),
+  upper = c(ci_herz_sars[1],ci_herz_o[1]),
+  lower = c(ci_herz_sars[2],ci_herz_o[2]),
+  row.names = c("SARS", "Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+plot2 <- ggplot(result_herz, aes(x = HR, y = rownames(result_herz), color = rownames(result_herz))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of heart-Problem on SARS-CoV-2 and Omicron") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_herz)), hjust = 1.4, size = 4)+     theme(axis.text.y = element_text(size = 16))
+
+
+hr_niere_a <- exp(coef(modelniere_a))
+ci_niere_a <- exp(confint(modelniere_a))
+
+hr_niere_b <- exp(coef(modelniere_b))
+ci_niere_b <- exp(confint(modelniere_b))
+
+hr_niere_sars <- exp(coef(modelniere_sars))
+ci_niere_sars <- exp(confint(modelniere_sars))
+
+hr_niere_o <- exp(coef(modelniere_o))
+ci_niere_o <- exp(confint(modelniere_o))
+
+result_niere <- data.frame(
+  HR = c(hr_niere_a, hr_niere_b,hr_niere_sars,hr_niere_o),
+  upper = c(ci_niere_a[1], ci_niere_b[1],ci_niere_sars[1],ci_niere_o[1]),
+  lower = c(ci_niere_a[2], ci_niere_b[2],ci_niere_sars[2],ci_niere_o[2]),
+  row.names = c("InfluenzaA", "Influenza B","SARS", "Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+plot3 <- ggplot(result_niere, aes(x = HR, y = rownames(result_niere), color = rownames(result_niere))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of DRI on SARS-Cov-2, Omicron and Influenza A/B") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_niere)), hjust = 1.4, size = 4)+     theme(axis.text.y = element_text(size = 16))
+
+grid.arrange(plot1, plot2, plot3, ncol = 2)
+
+```
+
+```{r Compareplot_labor}
+hr_crp_a <- exp(coef(modellabor_a2))
+ci_crp_a <- exp(confint(modellabor_a2))
+
+hr_crp_rsv <- exp(coef(modellabor_rsv2))
+ci_crp_rsv <- exp(confint(modellabor_rsv2))
+
+hr_crp_b <- exp(coef(modellabor_b2))
+ci_crp_b <- exp(confint(modellabor_b2))
+
+hr_crp_sars <- exp(coef(modellabor_sars2))
+ci_crp_sars <- exp(confint(modellabor_sars2))
+
+hr_crp_o <- exp(coef(modellabor_o2))
+ci_crp_o <- exp(confint(modellabor_o2))
+
+result_crp <- data.frame(
+  HR = c(hr_crp_a, hr_crp_rsv, hr_crp_b,hr_crp_sars,hr_crp_o),
+  upper = c(ci_crp_a[1], ci_crp_rsv[1], ci_crp_b[1],ci_crp_sars[1],ci_crp_o[1]),
+  lower = c(ci_crp_a[2], ci_crp_rsv[2], ci_crp_b[2],ci_crp_sars[2],ci_crp_o[2]),
+  row.names = c("InfluenzaA", "RSV","Influenza B","SARS", "Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+crpplot<-ggplot(result_crp, aes(x = HR, y = rownames(result_crp), color = rownames(result_crp))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+ geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of CRP on five virus") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_crp)), hjust = 1.4, size = 4) +
+  theme(axis.text.y = element_text(size = 16))
+
+
+hr_ldh_rsv <- exp(coef(modellabor_rsv1))
+ci_ldh_rsv <- exp(confint(modellabor_rsv1))
+
+hr_ldh_o <- exp(coef(modellabor_o1))
+ci_ldh_o <- exp(confint(modellabor_o1))
+
+result_ldh <- data.frame(
+  HR = c(hr_ldh_rsv, hr_ldh_o),
+  upper = c(ci_ldh_rsv[1], ci_ldh_o[1]),
+  lower = c(ci_ldh_rsv[2],ci_ldh_o[2]),
+  row.names = c("RSV","Omikron"),
+  check.names = FALSE
+)
+
+# 绘制图形
+ldhplot<-ggplot(result_ldh, aes(x = HR, y = rownames(result_ldh), color = rownames(result_ldh))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of LDH on RSV and Omicron") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_ldh)), hjust = 1.4, size = 4) +
+  theme(axis.text.y = element_text(size = 16))
+
+
+hr_leuko_a <- exp(coef(modellabor_a3))
+ci_leuko_a <- exp(confint(modellabor_a3))
+
+hr_leuko_b <- exp(coef(modellabor_b3))
+ci_leuko_b <- exp(confint(modellabor_b3))
+
+result_leuko <- data.frame(
+  HR = c(hr_leuko_a, hr_leuko_b),
+  upper = c(ci_leuko_a[1], ci_leuko_b[1]),
+  lower = c(ci_leuko_a[2], ci_leuko_b[2]),
+  row.names = c("InfluenzaA","Influenza B"),
+  check.names = FALSE
+)
+
+# 绘制图形
+leukoplot<-ggplot(result_leuko, aes(x = HR, y = rownames(result_leuko), color = rownames(result_leuko))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Leuko on Influenza A and Influenza B") +  
+  guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_leuko)), hjust = 1.4, size = 4) +
+  theme(axis.text.y = element_text(size = 16))
+
+
+hr_glukose_a <- exp(coef(modellabor_a4))
+ci_glukose_a <- exp(confint(modellabor_a4))
+
+hr_glukose_rsv <- exp(coef(modellabor_rsv4))
+ci_glukose_rsv <- exp(confint(modellabor_rsv4))
+
+hr_glukose_sars <- exp(coef(modellabor_sars4))
+ci_glukose_sars <- exp(confint(modellabor_sars4))
+
+
+result_glukose <- data.frame(
+  HR = c(hr_glukose_a, hr_glukose_rsv, hr_glukose_sars),
+  upper = c(ci_glukose_a[1], ci_glukose_rsv[1], ci_glukose_sars[1]),
+  lower = c(ci_glukose_a[2], ci_glukose_rsv[2], ci_glukose_sars[2]),
+  row.names = c("InfluenzaA", "RSV","SARS"),
+  check.names = FALSE
+)
+
+# 绘制图形
+gluplot<-ggplot(result_glukose,aes(x = HR, y = rownames(result_glukose), color = rownames(result_glukose))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "#555555", size = 0.5) +  
+  geom_pointrange(aes(xmin = lower, xmax = upper), size = 1.5) +  
+
+  theme_classic() +  
+  labs(x = "Hazard Ratio", y = NULL, color = NULL, title = "Effect of Glukose on SARS-CoV-2, RSV and Influenza A") +  
+    guides(color = guide_legend(reverse = TRUE)) +
+  geom_text(aes(label = round(HR, 2), x = HR, y = rownames(result_glukose)), hjust = 1.4, size = 4) +
+  theme(axis.text.y = element_text(size = 16))
+
+grid.arrange(crpplot, ldhplot, leukoplot, gluplot, ncol = 2)
+```
+
+
+## **1.3 Multivariate Analyse**
+
+### 1.3.1 Multiple Imputation
+```{r fluxplot}
+#当变量无缺失时Influx取值为0，变量完全缺失其值为1，而outflux则是无缺失其值为1，完全缺失为0。高Influx值的因素更容易被其他变量预测，而高outflux值的因素常作为潜在的预测因子
+#Influx and outflux:离对角线较近的变量通常比距离较远的变量关联性更好（关联性好的预测性更好），位于较低区域（尤其是左下角附近）且对后续分析不感兴趣的变量最好在插补之前从数据中删除
+par(cex = 0.4)
+fluxplot(InfluenzaA)
+fluxplot(RSV)
+fluxplot(InfluenzaB)
+fluxplot(SARSCov2)
+fluxplot(Omikron)
+```
+
+```{r MultipleimputationInfluenzaA}
+InfluenzaA2 <- InfluenzaA[,c(-which(names(InfluenzaA) %in% c("log_LDH", "log_CRP","log_Leuko","log_Glukose")))]
+
+quickpred(InfluenzaA2,mincor = 0.1,minpuc = 0,include="",exclude = c("Dyspnoe"),method = "pearson")
+imp1<-mice(InfluenzaA2,pred=quickpred(InfluenzaA2,mincor=0.1),seed=20230408,print=FALSE)
+complete(imp1, include = TRUE,print=FALSE)
+plot(imp1)
+densityplot(imp1) 
+```
+
+```{r MultipleimputationRSV}
+RSV2 <- RSV[,c(-which(names(RSV)%in%c("log_LDH","log_CRP","log_Leuko","log_Glukose")))]
+imp2<-mice(RSV2, method="pmm", seed=20230408,print=FALSE)
+complete(imp2, include = TRUE,print=FALSE)
+plot(imp2)
+densityplot(imp2) 
+```
+
+```{r MultipleimputationInfluenzaB}
+InfluenzaB2 <- InfluenzaB[,c(-which(names(InfluenzaB) %in% c("log_LDH", "log_CRP","log_Leuko","log_Glukose")))]
+
+quickpred(InfluenzaB2,mincor = 0.1,minpuc = 0,include="",exclude = "Dyspnoe",method = "pearson")
+imp3<-mice(InfluenzaB2, pred=quickpred(InfluenzaB2,mincor=0.1),seed=20230408)
+
+complete(imp3, include = TRUE,print=FALSE)
+plot(imp3)
+densityplot(imp3)  
+```
+
+```{r MultipleimputationSARS}
+SARSCov22 <- SARSCov2[,c(-which(names(SARSCov2) %in% c("log_LDH", "log_CRP","log_Leuko","log_Glukose")))]
+
+imp4<-mice(SARSCov22, method="pmm", seed=20230408,print=FALSE)
+complete(imp4, include = TRUE,print=FALSE)
+plot(imp4)
+densityplot(imp4) 
+```
+
+```{r MultipleimputationOmikron}
+Omikron2 <- Omikron[,c(-which(names(Omikron) %in% c("log_LDH", "log_CRP","log_Leuko","log_Glukose")))]
+imp5<-mice(Omikron2, method="pmm", seed=20230408,print=FALSE)
+complete(imp5, include = TRUE,print=FALSE)
+plot(imp5)
+densityplot(imp5) 
+```
+
+### 1.3.2 InfluenzaA
+```{r MultipleInfluenzaA}
+Amulti <- complete(imp1)
+
+Amulti$log_LDH <- log(Amulti$LDH)
+Amulti$log_LDH[!is.finite(Amulti$log_LDH)] <- 0
+
+Amulti$log_CRP <- log(Amulti$CRP)
+
+Amulti$log_Leuko <- log(Amulti$Leuko)
+Amulti$log_Leuko[!is.finite(Amulti$log_Leuko)] <- 0
+
+Amulti$log_Glukose <- log(Amulti$Glukose)
+
+Amulti2 <- Amulti[, c("nosokomial","Alter","bakt_Superinfektion","log_LDH","log_CRP","log_Leuko","log_Glukose","COPD","Tumor","Dialyse_Niereninsuff")]
+correlations1 <- cor(Amulti2) 
+
+#p值不显著的是blank不进入考虑
+testRes = cor.mtest(Amulti2, conf.level = 0.95)
+
+corrplot.mixed(correlations1, lower = 'number', upper = 'pie', order = 'AOE',number.cex = 0.8, p.mat = testRes$p, sig.level = 0.10, insig='blank', addCoef.col = 'grey50',tl.pos = "l",tl.col = NA, tl.cex = 1.0)
+
+```
+
+```{r InteractionA}
+#"nosokomial","Alter","bakt_Superinfektion","log_LDH","log_CRP","log_Leuko","log_Glukose","COPD","Tumor","Dialyse_Niereninsuff"
+
+f_a<- coxph(Surv(Liegezeit, Outcome) ~  log_CRP + log_Leuko + factor(bakt_Superinfektion) + factor(COPD),data=Amulti)
+summary(f_a)
+
+#在此基础上，当 "Tamiflu" 和 "log_Leuko" 存在交互作用时，可以看到不同 log_Leuko 取值的曲线出现交叉和/或平行的情况。具体而言，当 Tamiflu 对因变量的影响随着 log_Leuko 的不同取值而发生变化时，就存在交互作用。
+#plot(visreg(f_a, "Tamiflu", by="log_Leuko",plot=F),xlab="Tamiflu",ylab="log(Hazard ratio)",
+#overlay = T,partial = F,rug=F,,line=list(lty=1:6))
+```
+
+```{r Proportional_Hazards_Assumption_A}
+#没有协变量是随时间规律变化的。所有的协变量都满足比例风险的假设
+#当线条基本平行于X轴时们可以认为符合风险比例假设，因为假设的是系数不随时间变化
+#>0.05,说明风险之间的关系在时间上没有显著变化，即它们满足比例风险假设。
+test.ph1 <- cox.zph(f_a)
+test.ph1
+ggcoxzph(test.ph1)
+
+```
+Linearity_assumption
+如果拟合线类似为线性，表示满足线性假设。
+log_CRP + log_Leuko + bakt_Superinfektion + COPD
+使用非参数模型：可以使用基于排名的非参数模型，例如Cox比例风险模型或Kaplan-Meier曲线等，来分析该变量的影响。这些模型不需要假设线性关系，因此可以避免线性假设不成立的问题。
+ggcoxfunctional(Surv(Liegezeit, Outcome) ~ CRP + log_CRP  + sqrt(CRP), data = Amulti)
+or
+resid_l <- residuals(f_a, type = "deviance")
+norm_resid_l <- qnorm((rank(resid_l) - 0.5)/length(resid_l))
+resid_sorted_l <- resid_l[order(Amulti$log_CRP)]
+plot(norm_resid_l ~ resid_sorted_l, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+
+```{r Independence_assumption_A}
+#ggcoxdiagnostics(f_a, type = "deviance", linear.predictions = TRUE)
+#ggcoxdiagnostics(f1, type = "dfbeta", linear.predictions = TRUE)
+ggcoxdiagnostics(f_a, type = "martingale", linear.predictions = FALSE, ggtheme = theme_bw())
+
+```
+
+```{r Normality_assumption_A}
+res_a <- resid(f_a, type="deviance")
+qqnorm(res_a)
+qqline(res_a)
+
+
+#resid <- residuals(f_a, type = "martingale") 
+resid <- residuals(f_a, type = "deviance")
+
+# 将残差按照生存时间分位数排序
+quantiles <- quantile(Amulti$Liegezeit, probs = seq(0, 1, 0.2), na.rm = TRUE)
+resid_sorted <- rep(NA, length(resid))
+for(i in 1:length(quantiles)-1){
+  resid_sorted[which(Amulti$Liegezeit >= quantiles[i] & Amulti$Liegezeit < quantiles[i+1])] <- sort(resid)[which(Amulti$Liegezeit >= quantiles[i] & Amulti$Liegezeit < quantiles[i+1])]
+}
+#resid_sorted <- sort(resid)
+
+# 计算理论上的残差值
+norm_resid <- qnorm((rank(resid_sorted) - 0.5) / length(resid_sorted))
+
+# 绘制 Cox-Snell 残差图
+plot(norm_resid ~ resid_sorted, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+abline(0, 1, col = "red")
+```
+
+```{r crossvalidation_A}
+set.seed(123)
+Amulti_train <- Amulti[sample(nrow(Amulti), 0.8 * nrow(Amulti)), ]
+Amulti_test <- Amulti[!(row.names(Amulti) %in% row.names(Amulti_train)), ]
+
+
+```
+
+```{r influenzaARMST}
+median_age_A <- median(Amulti$Alter, na.rm = TRUE)
+#arm=1 <- older; arm=0 <- younger
+Amulti$age <- ifelse(Amulti$Alter < median_age_A, 0, 1)
+
+surv_obj_subA <- Surv(Amulti$Liegezeit, Amulti$Outcome)
+
+time=Amulti$Liegezeit
+status=Amulti$Outcome
+arm=Amulti$age
+tau=NULL
+rmst_A=rmst2(time, status, arm, tau = 90)
+print(rmst_A)
+
+#plot(rmst_A, xlab="days", ylab="Probability", density=60)
+plot(rmst_A, xlab = "days", ylab = "Probability", density = 60,title=NULL, subtitle=NULL )
+
+
+km_rmstA <- survfit(Surv(Liegezeit, Outcome) ~ age, data=Amulti)
+
+ggsurvplot(km_rmstA,data=Amulti,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "age", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("younger group","older group"), break.x.by = 20, censor.shape = 124,censor.size = 3) 
+
+
+
+#--- with covariates ----
+#f_a<- coxph(Surv(Liegezeit, Outcome) ~  log_CRP + log_Leuko + factor(bakt_Superinfektion) + factor(COPD),data=Amulti)
+#x=Amulti[,c(24,25,34,35)]
+#a=rmst2(time, status, arm, covariates=x)
+#print(a)
+```
+
+### 1.3.3 RSV
+```{r MultipleRSV}
+rsvmulti <- complete(imp2)
+
+rsvmulti$log_LDH <- log(rsvmulti$LDH)
+rsvmulti$log_LDH[!is.finite(rsvmulti$log_LDH)] <- 0
+
+rsvmulti$log_CRP <- log(rsvmulti$CRP)
+
+rsvmulti$log_Leuko <- log(rsvmulti$Leuko)
+rsvmulti$log_Leuko[!is.finite(rsvmulti$log_Leuko)] <- 0
+
+rsvmulti$log_Glukose <- log(rsvmulti$Glukose)
+
+
+rsvmulti2 <- rsvmulti[, c("Alter","nosokomial","bakt_Superinfektion","log_CRP","log_LDH","log_Glukose","Diabetes")]
+correlations2 <- cor(rsvmulti2) 
+
+#p值不显著的是blank不进入考虑
+testRes = cor.mtest(rsvmulti2, conf.level = 0.95)
+corrplot.mixed(correlations2, lower = 'number', upper = 'pie', order = 'AOE',number.cex = 0.8, p.mat = testRes$p, sig.level = 0.10, insig='blank', addCoef.col = 'grey50',tl.pos = "l",tl.col = NA, tl.cex = 1.0)
+
+```
+
+```{r InteractionRSV}
+#"Alter","nosokomial","bakt_Superinfektion","log_CRP","log_LDH","log_Glukose","Diabetes"
+
+#f_rsv<- coxph(Surv(Liegezeit, Outcome) ~ age_groups_rsv+factor(nosokomial) + factor(bakt_Superinfektion) + factor(Diabetes) ,data=rsvmulti)
+f_rsv<- coxph(Surv(Liegezeit, Outcome) ~nosokomial+ factor(bakt_Superinfektion)+factor(Diabetes) ,data=rsvmulti)
+summary(f_rsv)
+
+```
+
+```{r Proportional_Hazards_Assumption_RSV}
+#没有协变量是随时间规律变化的。所有的协变量都满足比例风险的假设
+#当线条基本平行于X轴时们可以认为符合风险比例假设，因为假设的是系数不随时间变化
+test.ph2 <- cox.zph(f_rsv)
+test.ph2
+ggcoxzph(test.ph2)
+```
+
+```{r Independence_assumption_RSV}
+#ggcoxdiagnostics(f_a, type = "deviance", linear.predictions = TRUE)
+#ggcoxdiagnostics(f1, type = "dfbeta", linear.predictions = TRUE)
+
+ggcoxdiagnostics(f_rsv, type = "martingale", linear.predictions = FALSE, ggtheme = theme_bw())
+
+resid2 <- residuals(f_rsv, type = "martingale")
+dw_test <- durbinWatsonTest(resid2)
+print(dw_test)
+```
+
+
+```{r Normality_assumption_RSV}
+res_rsv <- resid(f_rsv, type="deviance")
+qqnorm(res_rsv)
+qqline(res_rsv)
+
+
+#resid <- residuals(f_a, type = "martingale") 
+resid2 <- residuals(f_rsv, type = "deviance")
+
+# 将残差按照生存时间分位数排序
+quantiles2 <- quantile(rsvmulti$Liegezeit, probs = seq(0, 1, 0.2), na.rm = TRUE)
+resid_sorted2 <- rep(NA, length(resid2))
+for(i in 1:length(quantiles2)-1){
+  resid_sorted2[which(rsvmulti$Liegezeit >= quantiles2[i] & rsvmulti$Liegezeit < quantiles2[i+1])] <- sort(resid2)[which(rsvmulti$Liegezeit >= quantiles2[i] & rsvmulti$Liegezeit < quantiles2[i+1])]
+}
+#resid_sorted <- sort(resid)
+
+# 计算理论上的残差值
+norm_resid2 <- qnorm((rank(resid_sorted2) - 0.5) / length(resid_sorted2))
+
+# 绘制 Cox-Snell 残差图
+plot(norm_resid2 ~ resid_sorted2, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+abline(0, 1, col = "red")
+```
+
+
+### 1.3.4 InfluenzaB
+```{r MultipleInfluenzaB}
+Bmulti <- complete(imp3)
+
+Bmulti$log_LDH <- log(Bmulti$LDH)
+Bmulti$log_LDH[!is.finite(Bmulti$log_LDH)] <- 0
+
+Bmulti$log_CRP <- log(Bmulti$CRP)
+
+Bmulti$log_Leuko <- log(Bmulti$Leuko)
+Bmulti$log_Leuko[!is.finite(Bmulti$log_Leuko)] <- 0
+
+Bmulti$log_Glukose <- log(Bmulti$Glukose)
+
+Bmulti2 <- Bmulti[, c("nosokomial","bakt_Superinfektion","log_CRP","log_Leuko","Diabetes","Herz","Dialyse_Niereninsuff")]
+correlations3 <- cor(Bmulti2) 
+
+#p值不显著的是blank不进入考虑
+testRes = cor.mtest(Bmulti2, conf.level = 0.95)
+corrplot.mixed(correlations3, lower = 'number', upper = 'pie', order = 'AOE',number.cex = 0.8, p.mat = testRes$p, sig.level = 0.10, insig='blank', addCoef.col = 'grey50',tl.pos = "l",tl.col = NA, tl.cex = 1.0)
+
+```
+
+```{r InteractionB}
+#"nosokomial","bakt_Superinfektion","log_CRP","log_Leuko","Diabetes","Herz","Dialyse_Niereninsuff"
+
+f_b<- coxph(Surv(Liegezeit, Outcome) ~ factor(bakt_Superinfektion) + factor(Diabetes) +  factor(nosokomial),data=Bmulti)
+summary(f_b)
+
+```
+
+```{r Proportional_Hazards_Assumption_B}
+#没有协变量是随时间规律变化的。所有的协变量都满足比例风险的假设
+#当线条基本平行于X轴时们可以认为符合风险比例假设，因为假设的是系数不随时间变化
+#>0.05,说明风险之间的关系在时间上没有显著变化，即它们满足比例风险假设。
+test.ph3 <- cox.zph(f_b)
+test.ph3
+ggcoxzph(test.ph3)
+
+```
+
+```{r Independence_assumption_B}
+#ggcoxdiagnostics(f_a, type = "deviance", linear.predictions = TRUE)
+#ggcoxdiagnostics(f1, type = "dfbeta", linear.predictions = TRUE)
+ggcoxdiagnostics(f_b, type = "martingale", linear.predictions = FALSE, ggtheme = theme_bw())
+```
+
+```{r Normality_assumption_B}
+res_b <- resid(f_b, type="deviance")
+qqnorm(res_b)
+qqline(res_b)
+
+
+#resid <- residuals(f_a, type = "martingale") 
+resid_b <- residuals(f_b, type = "deviance")
+
+# 将残差按照生存时间分位数排序
+quantiles3 <- quantile(Bmulti$Liegezeit, probs = seq(0, 1, 0.2), na.rm = TRUE)
+resid_sorted3 <- rep(NA, length(resid_b))
+for(i in 1:length(quantiles3)-1){
+  resid_sorted3[which(Bmulti$Liegezeit >= quantiles3[i] & Bmulti$Liegezeit < quantiles3[i+1])] <- sort(resid_b)[which(Bmulti$Liegezeit >= quantiles3[i] & Bmulti$Liegezeit < quantiles3[i+1])]
+}
+#resid_sorted <- sort(resid)
+
+# 计算理论上的残差值
+norm_resid3 <- qnorm((rank(resid_sorted3) - 0.5) / length(resid_sorted3))
+
+# 绘制 Cox-Snell 残差图
+plot(norm_resid3 ~ resid_sorted3, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+abline(0, 1, col = "red")
+```
+
+### 1.3.5 SARS-COV-2
+```{r MultipleSARS}
+sarsmulti <- complete(imp4)
+
+sarsmulti$log_LDH <- log(sarsmulti$LDH)
+sarsmulti$log_LDH[!is.finite(sarsmulti$log_LDH)] <- 0
+
+sarsmulti$log_CRP <- log(sarsmulti$CRP)
+
+sarsmulti$log_Leuko <- log(sarsmulti$Leuko)
+sarsmulti$log_Leuko[!is.finite(sarsmulti$log_Leuko)] <- 0
+
+sarsmulti$log_Glukose <- log(sarsmulti$Glukose)
+
+sarsmulti2 <- sarsmulti[, c("nosokomial","bakt_Superinfektion","Diabetes","Herz","log_CRP","log_Glukose","COPD","Dialyse_Niereninsuff")]
+correlations4 <- cor(sarsmulti2) 
+
+#p值不显著的是blank不进入考虑
+testRes = cor.mtest(sarsmulti2, conf.level = 0.95)
+
+corrplot.mixed(correlations4, lower = 'number', upper = 'pie', order = 'AOE',number.cex = 0.8, p.mat = testRes$p, sig.level = 0.10, insig='blank', addCoef.col = 'grey50',tl.pos = "l",tl.col = NA, tl.cex = 1.0)
+
+```
+
+```{r Interactionsars}
+#"nosokomial","bakt_Superinfektion","Diabetes","Herz","log_CRP","log_Glukose","COPD","Dialyse_Niereninsuff")
+
+f_sars<- coxph(Surv(Liegezeit, Outcome) ~  log_CRP+factor(bakt_Superinfektion) +factor(nosokomial) ,data=sarsmulti)
+summary(f_sars)
+
+#在此基础上，当 "Tamiflu" 和 "log_Leuko" 存在交互作用时，可以看到不同 log_Leuko 取值的曲线出现交叉和/或平行的情况。具体而言，当 Tamiflu 对因变量的影响随着 log_Leuko 的不同取值而发生变化时，就存在交互作用。
+#plot(visreg(f_a, "Tamiflu", by="log_Leuko",plot=F),xlab="Tamiflu",ylab="log(Hazard ratio)",
+#overlay = T,partial = F,rug=F,,line=list(lty=1:6))
+```
+
+```{r Proportional_Hazards_Assumption_sars}
+#没有协变量是随时间规律变化的。所有的协变量都满足比例风险的假设
+#当线条基本平行于X轴时们可以认为符合风险比例假设，因为假设的是系数不随时间变化
+#>0.05,说明风险之间的关系在时间上没有显著变化，即它们满足比例风险假设。
+test.ph4 <- cox.zph(f_sars)
+test.ph4
+ggcoxzph(test.ph4)
+
+```
+
+```{r Independence_assumption_sars}
+#ggcoxdiagnostics(f_a, type = "deviance", linear.predictions = TRUE)
+#ggcoxdiagnostics(f1, type = "dfbeta", linear.predictions = TRUE)
+ggcoxdiagnostics(f_sars, type = "martingale", linear.predictions = FALSE, ggtheme = theme_bw())
+
+```
+
+```{r Normality_assumption_sars}
+res_sars <- resid(f_sars, type="deviance")
+qqnorm(res_sars)
+qqline(res_sars)
+
+
+#resid <- residuals(f_a, type = "martingale") 
+resid_sars <- residuals(f_sars, type = "deviance")
+
+# 将残差按照生存时间分位数排序
+quantiles4 <- quantile(sarsmulti$Liegezeit, probs = seq(0, 1, 0.2), na.rm = TRUE)
+resid_sorted4 <- rep(NA, length(resid_sars))
+for(i in 1:length(quantiles4)-1){
+  resid_sorted4[which(sarsmulti$Liegezeit >= quantiles4[i] & sarsmulti$Liegezeit < quantiles4[i+1])] <- sort(resid_sars)[which(sarsmulti$Liegezeit >= quantiles4[i] & sarsmulti$Liegezeit < quantiles4[i+1])]
+}
+#resid_sorted <- sort(resid)
+
+# 计算理论上的残差值
+norm_resid4 <- qnorm((rank(resid_sorted4) - 0.5) / length(resid_sorted4))
+
+# 绘制 Cox-Snell 残差图
+plot(norm_resid4 ~ resid_sorted4, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+abline(0, 1, col = "red")
+```
+
+### 1.3.6 Omikron
+```{r MultipleOmikron}
+omulti <- complete(imp5)
+
+omulti$log_LDH <- log(omulti$LDH)
+omulti$log_LDH[!is.finite(omulti$log_LDH)] <- 0
+
+omulti$log_CRP <- log(omulti$CRP)
+
+omultilog_Leuko <- log(omulti$Leuko)
+
+
+omulti$log_Glukose <- log(omulti$Glukose)
+
+omulti2 <- omulti[, c("Alter","nosokomial","bakt_Superinfektion","log_LDH","log_CRP","Diabetes","Herz","Dialyse_Niereninsuff")]
+correlations5 <- cor(omulti2) 
+
+#p值不显著的是blank不进入考虑
+testRes = cor.mtest(omulti2, conf.level = 0.95)
+corrplot.mixed(correlations5, lower = 'number', upper = 'pie', order = 'AOE',number.cex = 0.8, p.mat = testRes$p, sig.level = 0.10, insig='blank', addCoef.col = 'grey50',tl.pos = "l",tl.col = NA, tl.cex = 1.0)
+```
+
+```{r Interactionomi}
+#"Alter","nosokomial","bakt_Superinfektion","log_LDH","log_CRP","Diabetes","Herz","Dialyse_Niereninsuff"
+
+f_o<- coxph(Surv(Liegezeit, Outcome) ~  age_groups_o+log_LDH+factor(Diabetes),data=omulti)
+summary(f_o)
+```
+
+```{r Proportional_Hazards_Assumption_omi}
+#没有协变量是随时间规律变化的。所有的协变量都满足比例风险的假设
+#当线条基本平行于X轴时们可以认为符合风险比例假设，因为假设的是系数不随时间变化
+#>0.05,说明风险之间的关系在时间上没有显著变化，即它们满足比例风险假设。
+test.ph5 <- cox.zph(f_o)
+test.ph5
+ggcoxzph(test.ph5)
+```
+
+```{r Independence_assumption_omi}
+#ggcoxdiagnostics(f_a, type = "deviance", linear.predictions = TRUE)
+#ggcoxdiagnostics(f1, type = "dfbeta", linear.predictions = TRUE)
+ggcoxdiagnostics(f_o, type = "martingale", linear.predictions = FALSE, ggtheme = theme_bw())
+
+```
+
+```{r Normality_assumption_omi}
+res_o <- resid(f_o, type="deviance")
+qqnorm(res_o)
+qqline(res_o)
+
+
+#resid <- residuals(f_a, type = "martingale") 
+resid_o <- residuals(f_o, type = "deviance")
+
+# 将残差按照生存时间分位数排序
+quantiles5 <- quantile(omulti$Liegezeit, probs = seq(0, 1, 0.2), na.rm = TRUE)
+resid_sorted5 <- rep(NA, length(resid_o))
+for(i in 1:length(quantiles5)-1){
+  resid_sorted5[which(omulti$Liegezeit >= quantiles5[i] & omulti$Liegezeit < quantiles5[i+1])] <- sort(resid_o)[which(omulti$Liegezeit >= quantiles5[i] & omulti$Liegezeit < quantiles5[i+1])]
+}
+#resid_sorted <- sort(resid)
+
+# 计算理论上的残差值
+norm_resid5 <- qnorm((rank(resid_sorted5) - 0.5) / length(resid_sorted5))
+
+# 绘制 Cox-Snell 残差图
+plot(norm_resid5 ~ resid_sorted5, type = "p", col = "blue", xlab = "Ordered Residuals", ylab = "Theoretical Quantiles", main = "Cox-Snell Residual Plot")
+abline(0, 1, col = "red")
+```
+
+```{r ORMST}
+median_age_o <- median(omulti$Alter, na.rm = TRUE)
+#arm=1 <- older; arm=0 <- younger
+omulti$age <- ifelse(omulti$Alter < median_age_o, 0, 1)
+
+surv_obj_subo <- Surv(omulti$Liegezeit, omulti$Outcome)
+
+time=omulti$Liegezeit
+status=omulti$Outcome
+arm=omulti$age
+tau=NULL
+rmst_o=rmst2(time, status, arm, tau = 90)
+print(rmst_o)
+
+#plot(rmst_A, xlab="days", ylab="Probability", density=60)
+plot(rmst_o, xlab = "days", ylab = "Probability", density = 60,title=NULL, subtitle=NULL )
+
+
+km_rmstO <- survfit(Surv(Liegezeit, Outcome) ~ age, data=omulti)
+
+ggsurvplot(km_rmstO,data=omulti,surv.median.line="hv",conf.int=TRUE, risk.table = TRUE,tables.height = 0.3, pval = TRUE, pval.coord = c(80, 1), legend.title = "age", ylab="Prozentsatz der noch im Liegezeit", legend.labs = c("younger group","older group"), break.x.by = 20, censor.shape = 124,censor.size = 3) 
+
+```
+
+```{r someplot}
+upset(InfluenzaA, sets = c("Diabetes","Herz","Dialyse_Niereninsuff"), order.by = "freq", keep.order = TRUE, text.scale = 1.8)
+upset(Omikron, sets = c("Diabetes","Herz","Dialyse_Niereninsuff"), order.by = "freq", keep.order = TRUE, text.scale = 1.8)
+upset(RSV, sets = c("Diabetes","Herz","Dialyse_Niereninsuff"), order.by = "freq", keep.order = TRUE, text.scale = 1.8)
+upset(SARSCov2, sets = c("Diabetes","Herz","Dialyse_Niereninsuff"), order.by = "freq", keep.order = TRUE, text.scale = 1.8)
+
+
+par(mfrow = c(1, 5))
+# Plot the five boxplots
+boxplot(InfluenzaA$Alter, na.action = na.omit,cex.axis = 1.5)
+boxplot(RSV$Alter, na.action = na.omit,cex.axis = 1.5)
+boxplot(InfluenzaB$Alter, na.action = na.omit,cex.axis = 1.5)
+boxplot(SARSCov2$Alter, na.action = na.omit,cex.axis = 1.5)
+boxplot(Omikron$Alter, na.action = na.omit,cex.axis = 1.5)
+# Reset the layout to the default
+par(mfrow = c(1, 1))
+
+
+par(mfrow = c(1, 5))
+# Plot the five boxplots
+boxplot(InfluenzaA$Liegezeit, na.action = na.omit,cex.axis = 1.5)
+boxplot(RSV$Liegezeit, na.action = na.omit,cex.axis = 1.5)
+boxplot(InfluenzaB$Liegezeit, na.action = na.omit,cex.axis = 1.5)
+boxplot(SARSCov2$Liegezeit, na.action = na.omit,cex.axis = 1.5)
+boxplot(Omikron$Liegezeit, na.action = na.omit,cex.axis = 1.5)
+# Reset the layout to the default
+par(mfrow = c(1, 1))
+
+
+```
